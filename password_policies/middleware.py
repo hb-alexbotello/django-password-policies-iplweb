@@ -1,5 +1,5 @@
 import re
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 
 try:
     from django.urls.base import reverse, resolve, NoReverseMatch, Resolver404
@@ -21,6 +21,13 @@ from django.conf import settings as django_setings
 from password_policies.conf import settings
 from password_policies.models import PasswordChangeRequired, PasswordHistory
 from password_policies.utils import PasswordCheck
+
+
+def convert_timestamp_to_datetime(timestamp):
+    if isinstance(timestamp, str):
+        return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    else:
+        return timestamp
 
 
 class PasswordChangeMiddleware(MiddlewareMixin):
@@ -85,7 +92,9 @@ class PasswordChangeMiddleware(MiddlewareMixin):
                 # TODO: This relies on request.user.date_joined which might not
                 # be available!!!
                 request.session[self.last] = request.user.date_joined
-        if request.session[self.last] < self.expiry_datetime:
+
+        last = convert_timestamp_to_datetime(request.session[self.last])
+        if last < self.expiry_datetime:
             request.session[self.required] = True
             if not PasswordChangeRequired.objects.filter(user=request.user).count():
                 PasswordChangeRequired.objects.create(user=request.user)
@@ -108,7 +117,9 @@ class PasswordChangeMiddleware(MiddlewareMixin):
             if PasswordChangeRequired.objects.filter(user=request.user).count():
                 request.session[self.required] = True
                 return
-            if request.session[self.checked] < self.expiry_datetime:
+
+            checked = convert_timestamp_to_datetime(request.session[self.checked])
+            if checked < self.expiry_datetime:
                 try:
                     del request.session[self.last]
                     del request.session[self.checked]

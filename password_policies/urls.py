@@ -1,8 +1,9 @@
 try:
     from django.urls import re_path as url
+    from django.urls import path
 except ImportError:
     # Before Django 2.0
-    from django.conf.urls import url
+    from django.conf.urls import url, path
 
 import django.conf.urls
 if hasattr(django.conf.urls, 'patterns'):
@@ -32,8 +33,8 @@ urlpatterns = [
         PasswordResetCompleteView.as_view(),
         name="password_reset_complete",
     ),
-    url(
-        r"^reset/confirm/([0-9A-Za-z_\-]+)/([0-9A-Za-z]{1,13})/([0-9A-Za-z-=_]{1,128})/$",
+    path(
+        'reset/confirm/<uidb64>/<token>/',
         PasswordResetConfirmView.as_view(),
         name="password_reset_confirm",
     ),

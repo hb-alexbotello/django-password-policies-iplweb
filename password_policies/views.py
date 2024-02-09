@@ -5,11 +5,7 @@ from django.utils import timezone
 
 from password_policies.exceptions import MustBeLoggedOutException
 
-try:
-    from django.urls.base import reverse
-except ImportError:
-    # Before Django 2.0
-    from django.core.urlresolvers import reverse
+from django.urls.base import reverse
 
 from django.shortcuts import resolve_url
 from django.utils.decorators import method_decorator
@@ -27,6 +23,9 @@ from django.views.defaults import permission_denied
 from django.views.generic import TemplateView
 from django.views.generic.base import View
 from django.views.generic.edit import FormView
+from django.contrib.auth.tokens import default_token_generator
+from django.http import HttpResponseRedirect
+
 
 from password_policies.conf import settings
 from password_policies.forms import (
@@ -35,6 +34,7 @@ from password_policies.forms import (
     PasswordResetForm,
 )
 
+UserModel = get_user_model()
 
 class LoggedOutMixin(View):
     """
@@ -152,6 +152,9 @@ class PasswordResetCompleteView(LoggedOutMixin, TemplateView):
         return super().get_context_data(**kwargs)
 
 
+INTERNAL_RESET_URL_TOKEN = 'set-password'
+INTERNAL_RESET_SESSION_TOKEN = '_password_reset_token'
+
 class PasswordResetConfirmView(LoggedOutMixin, FormView):
     #: The form used by this view.
     form_class = PasswordPoliciesForm
@@ -162,31 +165,43 @@ class PasswordResetConfirmView(LoggedOutMixin, FormView):
     #: the same template used
     #: by :func:`django.contrib.views.password_reset_confirm`.
     template_name = "registration/password_reset_confirm.html"
+    token_generator = default_token_generator
 
     # @method_decorator(sensitive_post_parameters)
     @method_decorator(never_cache)
     def dispatch(self, request, *args, **kwargs):
-        self.uidb64 = args[0]
-        self.timestamp = args[1]
-        self.signature = args[2]
+        assert 'uidb64' in kwargs and 'token' in kwargs
+
         self.validlink = False
-        if self.uidb64 and self.timestamp and self.signature:
-            try:
-                uid = force_text(urlsafe_base64_decode(self.uidb64))
-                self.user = get_user_model().objects.get(id=uid)
-            except (ValueError, get_user_model().DoesNotExist):
-                self.user = None
-            else:
-                signer = signing.TimestampSigner()
-                max_age = settings.PASSWORD_RESET_TIMEOUT_DAYS * 24 * 60 * 60
-                il = (self.user.password, self.timestamp, self.signature)
-                try:
-                    signer.unsign(":".join(il), max_age=max_age)
-                except (signing.BadSignature, signing.SignatureExpired):
-                    pass
-                else:
+        self.user = self.get_user(kwargs['uidb64'])
+        if self.user is not None:
+            token = kwargs['token']
+            if token == INTERNAL_RESET_URL_TOKEN:
+                session_token = self.request.session.get(INTERNAL_RESET_SESSION_TOKEN)
+                if self.token_generator.check_token(self.user, session_token):
+                    # If the token is valid, display the password reset form.
                     self.validlink = True
-        return super().dispatch(request, *args, **kwargs)
+                    return super().dispatch(request, *args, **kwargs)
+            else:
+                if self.token_generator.check_token(self.user, token):
+                    # Store the token in the session and redirect to the
+                    # password reset form at a URL without the token. That
+                    # avoids the possibility of leaking the token in the
+                    # HTTP Referer header.
+                    self.request.session[INTERNAL_RESET_SESSION_TOKEN] = token
+                    redirect_url = self.request.path.replace(token, INTERNAL_RESET_URL_TOKEN)
+                    return HttpResponseRedirect(redirect_url)
+
+        # Display the "Password reset unsuccessful" page.
+        return self.render_to_response(self.get_context_data())
+
+    def get_user(self, uidb64):
+        try:
+            uid = urlsafe_base64_decode(uidb64).decode()
+            user = UserModel._default_manager.get(pk=uid)
+        except (TypeError, ValueError, OverflowError, UserModel.DoesNotExist, ValidationError):
+            user = None
+        return user
 
     def form_valid(self, form):
         form.save()
@@ -239,10 +254,7 @@ class PasswordResetFormView(LoggedOutMixin, FormView):
 
     #: A relative path to a template in the root of a template directory
     #: to generate the body of the mail.
-    email_template_name = "registration/password_reset_email.txt"
-    #: A relative path to a template in the root of a template directory
-    #: to generate the HTML attachment of the mail.
-    email_html_template_name = "registration/password_reset_email.html"
+    email_template_name = 'registration/password_reset_email.html'
     #: The form used by this view.
     form_class = PasswordResetForm
     #: The email address to use as sender of the email.
@@ -266,7 +278,6 @@ class PasswordResetFormView(LoggedOutMixin, FormView):
             "use_https": self.request.is_secure(),
             "from_email": self.from_email,
             "email_template_name": self.email_template_name,
-            "email_html_template_name": self.email_html_template_name,
             "subject_template_name": self.subject_template_name,
             "request": self.request,
         }
